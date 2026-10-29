@@ -183,7 +183,8 @@ export async function generatePdfFromHtml(htmlContent) {
           container.offsetHeight + 48
         );
         const totalHeight = Math.ceil(scrollH) + 48; // generous bottom padding
-        const totalWidth = 860; // 800px card + 30px each side
+        // Must match viewport width exactly (900px) so right side is never clipped
+        const totalWidth = 900;
         return { isProposal, totalWidth, totalHeight, marginZero: true };
       }
 
