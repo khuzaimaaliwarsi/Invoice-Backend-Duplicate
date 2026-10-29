@@ -5,11 +5,9 @@ import os from 'os';
 
 // Common Chrome/Chromium paths across platforms (Linux / Cloud / Docker / Windows / macOS)
 const CHROME_PATHS = [
-  // Explicit env overrides
   process.env.PUPPETEER_EXECUTABLE_PATH,
   process.env.CHROME_BIN,
   process.env.CHROME_PATH,
-  // Linux / Debian / Ubuntu / Render / Railway / Docker / Alpine
   '/usr/bin/google-chrome-stable',
   '/usr/bin/google-chrome',
   '/usr/bin/chromium-browser',
@@ -19,13 +17,11 @@ const CHROME_PATHS = [
   '/snap/bin/chromium',
   '/app/.apt/usr/bin/google-chrome',
   '/app/.apt/usr/bin/google-chrome-stable',
-  // Windows
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Users\\' + (process.env.USERNAME || 'hp') + '\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files\\Chromium\\Application\\chromium.exe',
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  // macOS
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
@@ -35,16 +31,13 @@ function findChrome() {
   for (const p of CHROME_PATHS) {
     if (existsSync(p)) return p;
   }
-  // If running on POSIX / Linux, try system PATH lookup
   if (os.platform() !== 'win32') {
     try {
       const output = execSync('which google-chrome-stable || which google-chrome || which chromium-browser || which chromium', {
         stdio: 'pipe'
       }).toString().trim().split('\n')[0];
       if (output && existsSync(output)) return output;
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   }
   return null;
 }
@@ -56,7 +49,6 @@ export async function getBrowser() {
   if (cachedBrowser && cachedBrowser.connected !== false) {
     return cachedBrowser;
   }
-
   if (browserLaunchPromise) {
     return browserLaunchPromise;
   }
@@ -93,9 +85,7 @@ export async function getBrowser() {
   }).then((browser) => {
     cachedBrowser = browser;
     browserLaunchPromise = null;
-    browser.on('disconnected', () => {
-      cachedBrowser = null;
-    });
+    browser.on('disconnected', () => { cachedBrowser = null; });
     return browser;
   }).catch((err) => {
     browserLaunchPromise = null;
@@ -111,17 +101,11 @@ async function getPage(browser) {
   if (warmPage && !warmPage.isClosed()) {
     const p = warmPage;
     warmPage = null;
-    // Pre-warm next page in the background asynchronously
-    browser.newPage().then(nextPage => {
-      warmPage = nextPage;
-    }).catch(() => {});
+    browser.newPage().then(next => { warmPage = next; }).catch(() => {});
     return p;
   }
-  // If no warm page ready yet, create one and also schedule next
   const page = await browser.newPage();
-  browser.newPage().then(nextPage => {
-    warmPage = nextPage;
-  }).catch(() => {});
+  browser.newPage().then(next => { warmPage = next; }).catch(() => {});
   return page;
 }
 
@@ -135,34 +119,50 @@ export function warmUpPdfEngine() {
 
 /**
  * Generate a PDF Buffer from an HTML string using Puppeteer + system Chrome.
- * Uses pre-warmed persistent browser & pages for near-instant rendering (< 80ms).
- * @param {string} htmlContent - Full HTML document
- * @returns {Promise<Buffer>} PDF Buffer
+ * Fast, pixel-perfect, equal margins on all sides.
  */
 export async function generatePdfFromHtml(htmlContent) {
   const browser = await getBrowser();
   const page = await getPage(browser);
 
   try {
-    // Use a very tall viewport so nothing is clipped during layout/measurement
+    // Viewport: 900px wide (fits 800px proposal card with 50px each side)
     await page.setViewport({ width: 900, height: 5000, deviceScaleFactor: 2 });
-    await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+
+    // domcontentloaded = instant (CSS/fonts are inline in our HTML templates)
+    await page.setContent(htmlContent, { waitUntil: 'domcontentloaded' });
     await page.emulateMediaType('print');
 
-    // Wait for fonts & deferred CSS to fully settle
-    await new Promise((r) => setTimeout(r, 150));
+    // Small delay for layout engine to settle
+    await new Promise((r) => setTimeout(r, 40));
 
-    // Detect document type and measure exact element size
     const docInfo = await page.evaluate(() => {
-      // .a4-page = Proposal, .proposal-* = legacy, anything else = Invoice/Statement
       const isProposal = !!(
         document.querySelector('.a4-page') ||
         document.querySelector('.proposal-doc, .proposal-container, .proposal-root, .proposal')
       );
-      const container = document.querySelector('.a4-page, .inv-container, .invoice, .statement') || document.body.firstElementChild || document.body;
+      const container = document.querySelector('.a4-page, .inv-container, .invoice, .statement')
+        || document.body.firstElementChild
+        || document.body;
 
-      // Force layout recalc
-      container.getBoundingClientRect();
+      container.getBoundingClientRect(); // force layout recalc
+
+      if (isProposal) {
+        // Proposal body CSS: padding: 24px 0 (top & bottom)
+        // Card: 800px, margin: 0 auto → 50px each side in 900px viewport
+        // scrollHeight already includes body padding-top (24px) + content + body padding-bottom (24px)
+        const scrollH = Math.max(
+          document.documentElement.scrollHeight,
+          document.body.scrollHeight,
+          container.scrollHeight + 48
+        );
+        // Add just 4px safety buffer — body padding (24px) handles top & bottom equally
+        const totalHeight = Math.ceil(scrollH) + 4;
+        const totalWidth  = 900; // must equal viewport width for zero clipping
+        return { isProposal, totalWidth, totalHeight, marginZero: true };
+      }
+
+      // Invoice / Statement
       const cardHeight = Math.ceil(Math.max(
         container.getBoundingClientRect().height,
         container.scrollHeight,
@@ -173,45 +173,30 @@ export async function generatePdfFromHtml(htmlContent) {
         container.scrollWidth,
         800
       ));
-
-      if (isProposal) {
-        // Capture full document scroll height so NOTHING gets cut off
-        const scrollH = Math.max(
-          document.documentElement.scrollHeight,
-          document.body.scrollHeight,
-          container.scrollHeight,
-          container.offsetHeight + 48
-        );
-        const totalHeight = Math.ceil(scrollH) + 48; // generous bottom padding
-        // Must match viewport width exactly (900px) so right side is never clipped
-        const totalWidth = 900;
-        return { isProposal, totalWidth, totalHeight, marginZero: true };
-      }
-
-      // Invoice / Statement framing
-      const topBottomMargin = 18;
-      const sideMargin = 8;
-      const totalHeight = cardHeight + (topBottomMargin * 2) + 20; // +20 safety buffer
-      const totalWidth = cardWidth + (sideMargin * 2);
-      return { isProposal, totalWidth, totalHeight, marginZero: false, topBottomMargin, sideMargin };
+      const pad = 20; // equal padding on all sides
+      return {
+        isProposal,
+        totalWidth:  cardWidth  + pad * 2,
+        totalHeight: cardHeight + pad * 2,
+        marginZero: false,
+        topBottomMargin: pad,
+        sideMargin: pad
+      };
     });
 
     const pdfBuffer = await page.pdf({
-      width: `${docInfo.totalWidth}px`,
-      height: `${docInfo.totalHeight}px`,
+      width:           `${docInfo.totalWidth}px`,
+      height:          `${docInfo.totalHeight}px`,
       printBackground: true,
       preferCSSPageSize: false,
-      margin: docInfo.marginZero ? {
-        top: '0px',
-        bottom: '0px',
-        left: '0px',
-        right: '0px'
-      } : {
-        top: `${docInfo.topBottomMargin}px`,
-        bottom: `${docInfo.topBottomMargin}px`,
-        left: `${docInfo.sideMargin}px`,
-        right: `${docInfo.sideMargin}px`
-      }
+      margin: docInfo.marginZero
+        ? { top: '0px', bottom: '0px', left: '0px', right: '0px' }
+        : {
+            top:    `${docInfo.topBottomMargin}px`,
+            bottom: `${docInfo.topBottomMargin}px`,
+            left:   `${docInfo.sideMargin}px`,
+            right:  `${docInfo.sideMargin}px`
+          }
     });
 
     return Buffer.from(pdfBuffer);
