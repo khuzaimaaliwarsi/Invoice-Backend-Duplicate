@@ -144,9 +144,13 @@ export async function generatePdfFromHtml(htmlContent) {
   const page = await getPage(browser);
 
   try {
-    await page.setViewport({ width: 840, height: 600, deviceScaleFactor: 2 });
-    await page.setContent(htmlContent, { waitUntil: 'domcontentloaded' });
+    // Use a very tall viewport so nothing is clipped during layout/measurement
+    await page.setViewport({ width: 900, height: 5000, deviceScaleFactor: 2 });
+    await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
     await page.emulateMediaType('print');
+
+    // Wait for fonts & deferred CSS to fully settle
+    await new Promise((r) => setTimeout(r, 150));
 
     // Detect document type and measure exact element size
     const docInfo = await page.evaluate(() => {
@@ -156,24 +160,37 @@ export async function generatePdfFromHtml(htmlContent) {
         document.querySelector('.proposal-doc, .proposal-container, .proposal-root, .proposal')
       );
       const container = document.querySelector('.a4-page, .inv-container, .invoice, .statement') || document.body.firstElementChild || document.body;
-      
-      const rect = container.getBoundingClientRect();
-      const cardHeight = Math.ceil(Math.max(rect.height, container.scrollHeight, container.offsetHeight));
-      const cardWidth = Math.ceil(Math.max(rect.width, container.scrollWidth, 800));
+
+      // Force layout recalc
+      container.getBoundingClientRect();
+      const cardHeight = Math.ceil(Math.max(
+        container.getBoundingClientRect().height,
+        container.scrollHeight,
+        container.offsetHeight
+      ));
+      const cardWidth = Math.ceil(Math.max(
+        container.getBoundingClientRect().width,
+        container.scrollWidth,
+        800
+      ));
 
       if (isProposal) {
-        // Body has 24px top & bottom padding and margin: 0 auto.
-        // totalWidth = 840 gives exact 20px left margin & 20px right margin - 100% symmetric!
-        const scrollH = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight, rect.bottom + 24);
-        const totalHeight = Math.ceil(scrollH) + 14;
-        const totalWidth = 840; // 800px card + 20px left + 20px right
+        // Capture full document scroll height so NOTHING gets cut off
+        const scrollH = Math.max(
+          document.documentElement.scrollHeight,
+          document.body.scrollHeight,
+          container.scrollHeight,
+          container.offsetHeight + 48
+        );
+        const totalHeight = Math.ceil(scrollH) + 48; // generous bottom padding
+        const totalWidth = 860; // 800px card + 30px each side
         return { isProposal, totalWidth, totalHeight, marginZero: true };
       }
 
       // Invoice / Statement framing
       const topBottomMargin = 18;
       const sideMargin = 8;
-      const totalHeight = cardHeight + (topBottomMargin * 2);
+      const totalHeight = cardHeight + (topBottomMargin * 2) + 20; // +20 safety buffer
       const totalWidth = cardWidth + (sideMargin * 2);
       return { isProposal, totalWidth, totalHeight, marginZero: false, topBottomMargin, sideMargin };
     });
@@ -201,4 +218,3 @@ export async function generatePdfFromHtml(htmlContent) {
     page.close().catch(() => {});
   }
 }
-
