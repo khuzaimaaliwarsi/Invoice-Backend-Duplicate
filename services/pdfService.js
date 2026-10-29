@@ -3,7 +3,6 @@ import { existsSync } from 'fs';
 import { execSync } from 'child_process';
 import os from 'os';
 
-// Common Chrome/Chromium paths across platforms (Linux / Cloud / Docker / Windows / macOS)
 const CHROME_PATHS = [
   process.env.PUPPETEER_EXECUTABLE_PATH,
   process.env.CHROME_BIN,
@@ -33,9 +32,10 @@ function findChrome() {
   }
   if (os.platform() !== 'win32') {
     try {
-      const output = execSync('which google-chrome-stable || which google-chrome || which chromium-browser || which chromium', {
-        stdio: 'pipe'
-      }).toString().trim().split('\n')[0];
+      const output = execSync(
+        'which google-chrome-stable || which google-chrome || which chromium-browser || which chromium',
+        { stdio: 'pipe' }
+      ).toString().trim().split('\n')[0];
       if (output && existsSync(output)) return output;
     } catch (e) {}
   }
@@ -46,40 +46,23 @@ let cachedBrowser = null;
 let browserLaunchPromise = null;
 
 export async function getBrowser() {
-  if (cachedBrowser && cachedBrowser.connected !== false) {
-    return cachedBrowser;
-  }
-  if (browserLaunchPromise) {
-    return browserLaunchPromise;
-  }
+  if (cachedBrowser && cachedBrowser.connected !== false) return cachedBrowser;
+  if (browserLaunchPromise) return browserLaunchPromise;
 
   const executablePath = findChrome();
-  if (!executablePath) {
-    throw new Error('Chrome/Edge not found on this system. Please install Google Chrome.');
-  }
+  if (!executablePath) throw new Error('Chrome/Edge not found. Please install Google Chrome.');
 
   browserLaunchPromise = puppeteer.launch({
     executablePath,
     headless: true,
     args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-gpu',
-      '--disable-dev-shm-usage',
-      '--no-first-run',
-      '--disable-background-networking',
-      '--disable-background-timer-throttling',
-      '--disable-breakpad',
-      '--disable-client-side-phishing-detection',
-      '--disable-default-apps',
-      '--disable-extensions',
-      '--disable-hang-monitor',
-      '--disable-popup-blocking',
-      '--disable-prompt-on-repost',
-      '--disable-sync',
-      '--disable-translate',
-      '--metrics-recording-only',
-      '--mute-audio',
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu',
+      '--disable-dev-shm-usage', '--no-first-run',
+      '--disable-background-networking', '--disable-background-timer-throttling',
+      '--disable-breakpad', '--disable-client-side-phishing-detection',
+      '--disable-default-apps', '--disable-extensions', '--disable-hang-monitor',
+      '--disable-popup-blocking', '--disable-prompt-on-repost', '--disable-sync',
+      '--disable-translate', '--metrics-recording-only', '--mute-audio',
       '--safebrowsing-disable-auto-update'
     ]
   }).then((browser) => {
@@ -118,51 +101,68 @@ export function warmUpPdfEngine() {
 }
 
 /**
- * Generate a PDF Buffer from an HTML string using Puppeteer + system Chrome.
- * Fast, pixel-perfect, equal margins on all sides.
+ * Generate a PDF Buffer from HTML.
+ * Mathematically perfect centering: left === right, top === bottom.
+ * Single-page guarantee without content cut-off.
  */
 export async function generatePdfFromHtml(htmlContent) {
   const browser = await getBrowser();
   const page = await getPage(browser);
 
   try {
-    // Viewport: 900px wide (fits 800px proposal card with 50px each side)
-    await page.setViewport({ width: 900, height: 5000, deviceScaleFactor: 2 });
-
-    // domcontentloaded = instant (CSS/fonts are inline in our HTML templates)
+    // 900px viewport ensures 800px proposal card has 50px each side
+    await page.setViewport({ width: 900, height: 10000, deviceScaleFactor: 2 });
     await page.setContent(htmlContent, { waitUntil: 'domcontentloaded' });
     await page.emulateMediaType('print');
 
-    // Small delay for layout engine to settle
-    await new Promise((r) => setTimeout(r, 40));
+    // Settle reflow
+    await new Promise((r) => setTimeout(r, 50));
 
     const docInfo = await page.evaluate(() => {
       const isProposal = !!(
         document.querySelector('.a4-page') ||
         document.querySelector('.proposal-doc, .proposal-container, .proposal-root, .proposal')
       );
-      const container = document.querySelector('.a4-page, .inv-container, .invoice, .statement')
+
+      if (isProposal) {
+        const card = document.querySelector('.a4-page');
+        if (!card) {
+          return {
+            isProposal: true,
+            totalWidth: 900,
+            totalHeight: document.documentElement.scrollHeight + 48,
+            marginZero: true
+          };
+        }
+
+        // Make sure card allows full content display
+        card.style.height = 'auto';
+        card.style.overflow = 'visible';
+
+        const rect = card.getBoundingClientRect();
+        // Top gap is exact top offset of card from viewport (e.g. 24px html + 24px body = 48px)
+        const topGap = Math.max(20, Math.ceil(rect.top));
+        const cardHeight = Math.ceil(rect.height);
+
+        // PERFECT EQUAL MARGINS:
+        // Top gap == topGap (48px)
+        // Bottom gap == topGap (48px)
+        // Left gap == (900 - 800) / 2 = 50px
+        // Right gap == (900 - 800) / 2 = 50px
+        // +2px safety buffer avoids 1px fractional rounding overflow in Chrome's print pagination
+        const totalHeight = cardHeight + (topGap * 2) + 2;
+        const totalWidth = 900;
+
+        return { isProposal: true, totalWidth, totalHeight, marginZero: true };
+      }
+
+      // ── Invoice / Statement ───────────────────────────────────────────────
+      const container = document.querySelector('.inv-container, .invoice, .statement')
         || document.body.firstElementChild
         || document.body;
 
-      container.getBoundingClientRect(); // force layout recalc
+      container.getBoundingClientRect();
 
-      if (isProposal) {
-        // Proposal body CSS: padding: 24px 0 (top & bottom)
-        // Card: 800px, margin: 0 auto → 50px each side in 900px viewport
-        // scrollHeight already includes body padding-top (24px) + content + body padding-bottom (24px)
-        const scrollH = Math.max(
-          document.documentElement.scrollHeight,
-          document.body.scrollHeight,
-          container.scrollHeight + 48
-        );
-        // Add just 4px safety buffer — body padding (24px) handles top & bottom equally
-        const totalHeight = Math.ceil(scrollH) + 4;
-        const totalWidth  = 900; // must equal viewport width for zero clipping
-        return { isProposal, totalWidth, totalHeight, marginZero: true };
-      }
-
-      // Invoice / Statement
       const cardHeight = Math.ceil(Math.max(
         container.getBoundingClientRect().height,
         container.scrollHeight,
@@ -173,29 +173,31 @@ export async function generatePdfFromHtml(htmlContent) {
         container.scrollWidth,
         800
       ));
-      const pad = 20; // equal padding on all sides
+
+      // Equal 20px padding on all 4 sides: top, bottom, left, right
+      const PAD = 20;
       return {
-        isProposal,
-        totalWidth:  cardWidth  + pad * 2,
-        totalHeight: cardHeight + pad * 2,
+        isProposal: false,
+        totalWidth: cardWidth + (PAD * 2),
+        totalHeight: cardHeight + (PAD * 2),
         marginZero: false,
-        topBottomMargin: pad,
-        sideMargin: pad
+        topBottomMargin: PAD,
+        sideMargin: PAD
       };
     });
 
     const pdfBuffer = await page.pdf({
-      width:           `${docInfo.totalWidth}px`,
-      height:          `${docInfo.totalHeight}px`,
+      width: `${docInfo.totalWidth}px`,
+      height: `${docInfo.totalHeight}px`,
       printBackground: true,
       preferCSSPageSize: false,
       margin: docInfo.marginZero
         ? { top: '0px', bottom: '0px', left: '0px', right: '0px' }
         : {
-            top:    `${docInfo.topBottomMargin}px`,
+            top: `${docInfo.topBottomMargin}px`,
             bottom: `${docInfo.topBottomMargin}px`,
-            left:   `${docInfo.sideMargin}px`,
-            right:  `${docInfo.sideMargin}px`
+            left: `${docInfo.sideMargin}px`,
+            right: `${docInfo.sideMargin}px`
           }
     });
 
